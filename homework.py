@@ -51,10 +51,7 @@ def send_message(bot, message):
 
 
 def get_api_answer(timestamp):
-    """
-    Делает запрос к API и возвращает ответ при успешном запросе,
-    иначе выбрасывает исключение.
-    """
+    """Делает запрос к API и возвращает ответ при успешном запросе."""
     try:
         response = requests.get(
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
@@ -81,10 +78,7 @@ def check_response(response):
 
 
 def parse_status(homework):
-    """
-    Извлекает из информации статус домашней работы и выводит статус
-    данной работы.
-    """
+    """Извлекает из информации статус домашней работы."""
     if (
             not homework.get('homework_name')
             or homework.get('status') == 'unknown'
