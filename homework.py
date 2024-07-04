@@ -1,3 +1,4 @@
+import http
 import logging
 import os
 import time
@@ -8,7 +9,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -17,12 +17,22 @@ RETRY_PERIOD = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
-
 HOMEWORK_VERDICTS = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
     'reviewing': 'Работа взята на проверку ревьюером.',
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
+
+
+class GeneralError(Exception):
+    """Общая ошибка."""
+    pass
+
+
+class CriticalError(Exception):
+    """Критическая ошибка."""
+    pass
+
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -33,12 +43,15 @@ logging.basicConfig(
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
-    if PRACTICUM_TOKEN and TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        return True
-    logging.critical(
-        'Отсутствуют данные в пространстве переменных'
-    )
-    return False
+    tokens = {
+        "PRACTICUM_TOKEN": PRACTICUM_TOKEN,
+        "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
+        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID
+    }
+    if not all(tokens.values()):
+        missing_tokens = [name for name, token in tokens.items() if
+                          not token]
+        raise CriticalError(f'Отсутствуют токены: {missing_tokens}')
 
 
 def send_message(bot, message):
@@ -46,8 +59,8 @@ def send_message(bot, message):
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         logging.debug('Сообщение отправлено!')
-    except Exception:
-        logging.error('Сообщение не отправлено!')
+    except Exception as e:
+        raise GeneralError(f'Сообщение {str(e)} не отправлено!')
 
 
 def get_api_answer(timestamp):
@@ -56,25 +69,31 @@ def get_api_answer(timestamp):
         response = requests.get(
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
         )
+        if response.status_code != http.HTTPStatus.OK:
+            raise GeneralError('Отсутствует доступ к эндпоинту')
         check_response(response.json())
 
-    except requests.RequestException:
-        return 'API error'
-    if response.status_code != 200:
-        logging.error('Отсутствует доступ к эндпоинту')
-        raise requests.RequestException
+    except requests.RequestException as req_err:
+        return f'Возникла проблема: {req_err}'
     return response.json()
 
 
 def check_response(response):
     """Проверяет правильно полученный API ответ."""
-    if (
-        not isinstance(response, dict)
-        or not isinstance(response.get('homeworks'), list)
-    ):
-        raise TypeError
-    if not response.get('homeworks'):
-        logging.debug('Список домашних работ пуст')
+    if not isinstance(response, dict):
+        raise TypeError(
+            f'Тип переменной "response": ожидался dict, '
+            f'получен {type(response)}'
+        )
+    if 'homeworks' not in response:
+        raise KeyError(
+            'Отсутствует ключ "homeworks" в полученном ответе'
+        )
+
+    if not isinstance(response['homeworks'], list):
+        raise TypeError(
+            f'Тип переменной "homeworks": ожидался list, '
+            f'получен {type(response["homeworks"])}')
 
 
 def parse_status(homework):
@@ -97,19 +116,37 @@ def parse_status(homework):
 def main():
     """Основная логика работы бота."""
     bot = TeleBot(token=TELEGRAM_TOKEN)
-    timestamp = time.time() - RETRY_PERIOD
-
-    while True:
-        try:
-            if not check_tokens():
-                break
-            homework = get_api_answer(timestamp).get('homeworks')
-            if homework:
-                send_message(bot, parse_status(homework[0]))
-
-        except Exception as error:
-            logging.error(f'Сбой в работе программы: {error}')
-        time.sleep(RETRY_PERIOD)
+    timestamp, last_message, last_error_message = 0, '', ''
+    try:
+        check_tokens()
+        while True:
+            try:
+                response = get_api_answer(timestamp)
+                homework = response.get('homeworks')
+                timestamp = response.get('current_date')
+                if homework:
+                    message = parse_status(homework[0])
+                    if last_message != message:
+                        send_message(bot, message)
+                        last_message = message
+                else:
+                    # Пытался так же как с error и critical выбрасывать
+                    # кастомное исключение DebugError, но на такой
+                    # метод ругался тест.
+                    logging.debug('Список домашних работ пуст')
+            except GeneralError as error:
+                logging.error(error)
+            except Exception as error:
+                error_message = f'Сбой в работе программы: {error}'
+                if last_error_message != error_message:
+                    logging.error(error_message)
+                    send_message(bot, error_message)
+                    last_error_message = error_message
+            finally:
+                time.sleep(RETRY_PERIOD)
+    except CriticalError as error:
+        logging.critical(error)
+        exit(1)
 
 
 if __name__ == '__main__':
