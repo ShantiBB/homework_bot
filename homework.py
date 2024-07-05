@@ -1,11 +1,14 @@
 import http
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import time
 
 import requests
 from telebot import TeleBot
 from dotenv import load_dotenv
+
+from exceptions import GeneralError, CriticalError
 
 load_dotenv()
 
@@ -23,28 +26,26 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-
-class GeneralError(Exception):
-    """Общая ошибка."""
-
-    pass
-
-
-class CriticalError(Exception):
-    """Критическая ошибка."""
-
-    pass
-
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    filename='main.log',
-    format='%(asctime)s, %(levelname)s, %(message)s, %(name)s'
+logger = logging.getLogger(__name__)
+terminal_handler = logging.StreamHandler()
+file_handler = RotatingFileHandler(
+    'main.log', maxBytes=5 * 1024 * 1024, backupCount=5
 )
+formater = logging.Formatter(
+    '%(asctime)s, %(levelname)s, %(name)s, '
+    'строка: %(lineno)d, функция: %(funcName)s, %(message)s'
+)
+
+logger.setLevel(logging.DEBUG)
+terminal_handler.setFormatter(formater)
+file_handler.setFormatter(formater)
+logger.addHandler(terminal_handler)
+logger.addHandler(file_handler)
 
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
+    valid = True
     tokens = {
         "PRACTICUM_TOKEN": PRACTICUM_TOKEN,
         "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
@@ -53,14 +54,16 @@ def check_tokens():
     if not all(tokens.values()):
         missing_tokens = [name for name, token in tokens.items() if
                           not token]
-        raise CriticalError(f'Отсутствуют токены: {missing_tokens}')
+        valid = False
+        return valid, missing_tokens
+    return valid, None
 
 
 def send_message(bot, message):
     """Отправляет сообщение со статусом работы в Telegram-чат."""
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-        logging.debug('Сообщение отправлено!')
+        logger.debug('Сообщение отправлено!')
     except Exception as e:
         raise GeneralError(f'Сообщение {str(e)} не отправлено!')
 
@@ -71,12 +74,11 @@ def get_api_answer(timestamp):
         response = requests.get(
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
         )
-        if response.status_code != http.HTTPStatus.OK:
-            raise GeneralError('Отсутствует доступ к эндпоинту')
         check_response(response.json())
-
     except requests.RequestException as req_err:
         return f'Возникла проблема: {req_err}'
+    if response.status_code != http.HTTPStatus.OK:
+        raise GeneralError('Отсутствует доступ к эндпоинту')
     return response.json()
 
 
@@ -101,14 +103,16 @@ def check_response(response):
 def parse_status(homework):
     """Извлекает из информации статус домашней работы."""
     if (
-            not homework.get('homework_name')
-            or homework.get('status') == 'unknown'
+        'homework_name' not in homework
+        or homework['status'] == 'unknown'
     ):
         raise KeyError
-    homework_name = homework.get('homework_name')
-    status = homework.get('status')
-    verdict = HOMEWORK_VERDICTS[status]
-
+    homework_name = homework['homework_name']
+    status = homework['status']
+    if status in HOMEWORK_VERDICTS:
+        verdict = HOMEWORK_VERDICTS[status]
+    else:
+        verdict = 'Статус не определен.'
     return (
         f'Изменился статус проверки работы '
         f'"{homework_name}". {verdict}'
@@ -120,34 +124,34 @@ def main():
     bot = TeleBot(token=TELEGRAM_TOKEN)
     timestamp, last_message, last_error_message = 0, '', ''
     try:
-        check_tokens()
+        valid, missing_tokens = check_tokens()
+        if not valid:
+            raise CriticalError(f'Отсутствуют токены: {missing_tokens}')
         while True:
             try:
                 response = get_api_answer(timestamp)
                 homework = response.get('homeworks')
                 timestamp = response.get('current_date')
-                if homework:
-                    message = parse_status(homework[0])
-                    if last_message != message:
-                        send_message(bot, message)
-                        last_message = message
-                else:
-                    # Пытался так же как с error и critical выбрасывать
-                    # кастомное исключение DebugError, но на такой
-                    # метод ругался тест.
-                    logging.debug('Список домашних работ пуст')
+
+                message = parse_status(homework[0])
+                if last_message != message:
+                    send_message(bot, message)
+                    last_message = message
+                if not homework:
+                    logger.debug('Список домашних работ пуст')
             except GeneralError as error:
-                logging.error(error)
+                logger.error(error)
+                send_message(bot, error)
             except Exception as error:
                 error_message = f'Сбой в работе программы: {error}'
                 if last_error_message != error_message:
-                    logging.error(error_message)
+                    logger.error(error_message)
                     send_message(bot, error_message)
                     last_error_message = error_message
             finally:
                 time.sleep(RETRY_PERIOD)
     except CriticalError as error:
-        logging.critical(error)
+        logger.critical(error)
         exit(1)
 
 
