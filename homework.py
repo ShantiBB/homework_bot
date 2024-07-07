@@ -8,7 +8,7 @@ import requests
 from telebot import TeleBot
 from dotenv import load_dotenv
 
-from exceptions import GeneralError, CriticalError
+from exceptions import CriticalError
 
 load_dotenv()
 
@@ -64,8 +64,10 @@ def send_message(bot, message):
     try:
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         logger.debug('Сообщение отправлено!')
-    except Exception as e:
-        raise GeneralError(f'Сообщение {str(e)} не отправлено!')
+    except requests.RequestException:
+        raise Exception(
+            f'Сообщение не отправлено!'
+        )
 
 
 def get_api_answer(timestamp):
@@ -76,9 +78,9 @@ def get_api_answer(timestamp):
         )
         check_response(response.json())
     except requests.RequestException as req_err:
-        return f'Возникла проблема: {req_err}'
+        raise Exception(f'Возникла проблема: {req_err}')
     if response.status_code != http.HTTPStatus.OK:
-        raise GeneralError('Отсутствует доступ к эндпоинту')
+        raise Exception('Отсутствует доступ к эндпоинту')
     return response.json()
 
 
@@ -102,11 +104,13 @@ def check_response(response):
 
 def parse_status(homework):
     """Извлекает из информации статус домашней работы."""
-    if (
-        'homework_name' not in homework
-        or homework['status'] == 'unknown'
-    ):
-        raise KeyError
+    if 'homework_name' not in homework:
+        raise KeyError(
+            'homework_name отсутствует в списке '
+            'домашних работ "homework"'
+        )
+    if homework['status'] == 'unknown':
+        raise KeyError('Статус работы "unknown"')
     homework_name = homework['homework_name']
     status = homework['status']
     if status in HOMEWORK_VERDICTS:
@@ -139,13 +143,10 @@ def main():
                     last_message = message
                 if not homework:
                     logger.debug('Список домашних работ пуст')
-            except GeneralError as error:
-                logger.error(error)
-                send_message(bot, error)
             except Exception as error:
                 error_message = f'Сбой в работе программы: {error}'
+                logger.error(error_message)
                 if last_error_message != error_message:
-                    logger.error(error_message)
                     send_message(bot, error_message)
                     last_error_message = error_message
             finally:
